@@ -163,7 +163,8 @@ compute_unconditional_moments <-
 
 # Estimates RCs under Normality assumptions
 estimate_main <- function(X, Z, Y, 
-                    mean_rcond_bnd, cov_rcond_bnd, 
+                    mean_rcond_bnd, cov_rcond_bnd,
+                    bw0,
                     mean_bw1, mean_bw2, cov_bw1, cov_bw2,
                     q1_low, q1_high, q2_low, q2_high) {
 
@@ -171,7 +172,7 @@ estimate_main <- function(X, Z, Y,
     n_z <- dim(Z)[2]/2
     Z1 <- Z[,seq(1, n_z)]
     Z2 <- Z[,seq(n_z+1, 2*n_z)]
-
+    
     # Shocks moments and fixed coeffs
     tmp <- estimate_shocks_and_fixed(Y, X, Z1, Z2, bw0)
     b_Z = tmp$b_z
@@ -180,7 +181,7 @@ estimate_main <- function(X, Z, Y,
 
     # Subtract terms involving fixed coeffs (i.e., Z_{t}'b_{t})
     Z1b1 <- Z1 %*% b_Z[c(1,n_z), 1, drop = FALSE]
-    Z2b2 <- Z2 %*% b_Z[c(n_z+1,2*n_z), 1, drop = FALSE]
+    Z2b2 <- Z2 %*% b_Z[c(n_z+1, 2*n_z), 1, drop = FALSE]
     Ytilde <- Y - cbind(Z1b1, Z2b2) 
 
     # Conditional first moments 
@@ -217,37 +218,25 @@ estimate_main <- function(X, Z, Y,
 # Main wrapper function
 fhhps <- function(Y1, Y2, X1, X2, Z1, Z2,
                  mean_rcond_bnd = .1, cov_rcond_bnd = .1, 
-                 mean_bw1 = NULL, mean_bw2 = NULL, 
-                 cov_bw1 = NULL, cov_bw2 = NULL,
-                 q1_low = 0, q1_high = 1,
-                 q2_low = 0, q2_high = 1) {
- 
-    # Subtract means
-    X1_mean <- mean(X1)
-    X2_mean <- mean(X2)
-    X_mean <- (X1_mean + X2_mean)/2
-    X1 <- X1 - X_mean
-    X2 <- X2 - X_mean
-    
+                 bw0 = .1,
+                 mean_bw1 = .1, mean_bw2 = .1, 
+                 cov_bw1 = .1, cov_bw2 = .1,
+                 q1_low = 0.01, q1_high = .99,
+                 q2_low = 0.00, q2_high = .98) {
+     
     # Ensure appropriate matrix form
     n_obs <- length(Y1)
     Y <- matrix(cbind(Y1, Y2), n_obs, 2)    
     X <- matrix(cbind(X1, X2), n_obs, 2)
     
     if (is.null(Z1) || is.null(Z2)) {
-        Z <- NULL
+        Z <- matrix(0, n_obs, 2)
     } else {
         Z <- matrix(cbind(Z1, Z2), n_obs, 2*dim(Z1)[2])
     }
     
-    # Assign default bandwidths where unassigned
-    mean_bw1 <- if (is.null(mean_bw1)) 0.1*diff(range(X)) else mean_bw1
-    mean_bw2 <- if (is.null(mean_bw2)) 0.05*diff(range(X)) else mean_bw2
-    cov_bw1 <- if (is.null(cov_bw1)) 0.1*diff(range(X)) else cov_bw1
-    cov_bw2 <- if (is.null(cov_bw2)) 0.05*diff(range(X)) else cov_bw2
-
     # Estimate moments
-    moments <- estimate_main(X, Z, Y, mean_rcond_bnd, cov_rcond_bnd, 
+    moments <- estimate_main(X, Z, Y, mean_rcond_bnd, cov_rcond_bnd, bw0, 
                 mean_bw1, mean_bw2, cov_bw1, cov_bw2, 
                 q1_low, q1_high, q2_low, q2_high) 
 
@@ -258,10 +247,9 @@ fhhps <- function(Y1, Y2, X1, X2, Z1, Z2,
 
 
 
-#### Delete this function later
+#### Auxiliary function generates data satisfying model assumptions
 
-# Functions
-create_data <- function(n_obs, X_mean = 0) {
+create_data <- function(n_obs) {
 
     # Draw coefficients for first period
     mAB <- c(1,2)
@@ -281,11 +269,12 @@ create_data <- function(n_obs, X_mean = 0) {
         .5*A^2 - .2*B^2 + 
         rnorm(n = 1,mean = 0, sd = sqrt(5))
     
-    # Force X1 to have desired mean
-    X1 <- X1 - mean(X1) + X_mean
+    # De-mean X1
+    X1 <- X1 - mean(X1) 
     X_sd <- sd(X1)
-    # X2 is not correlated with A,B, but has same support
-    X2 <- rnorm(n = n_obs, mean = X_mean, sd = X_sd)
+    
+    # X2 is not correlated with A,B, but has same mean (zero) and std. dev.
+    X2 <- rnorm(n = n_obs, mean = 0, sd = X_sd)
     X <- cbind(X1, X2)
 
 
@@ -302,8 +291,10 @@ create_data <- function(n_obs, X_mean = 0) {
 
     # Bind everything in a list to return
     dataset <- list()
-    dataset$X <- X
-    dataset$Y <- Y
+    dataset$X1 <- X1
+    dataset$X2 <- X2
+    dataset$Y1 <- Y1
+    dataset$Y2 <- Y2
     dataset$A <- A
     dataset$B <- B
     dataset$W <- W
