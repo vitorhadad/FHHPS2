@@ -24,31 +24,36 @@ lp <- function(YY, XX, xx, b) {
 }
 
 
-# Shock pameters
-estimate_shocks_and_fixed <- function(Y, X, Z1, Z2, bw0) {
+# Shock moments and fixed coefficients beta_{t}
+estimate_shocks_and_fixed <- function(Y, X, Z1, Z2, shocks_bw) {
 
     # First moments
     DY <- Y[,2] - Y[,1]
-    coeffs <- lp(DY, cbind(1, X[,2], (-1)*Z1, Z2), X[,2] - X[,1], b = bw0)
+    coeffs <- lp(DY, cbind(1, X[,2], (-1)*Z1, Z2), X[,2] - X[,1], b = shocks_bw)
     EU <- coeffs[1]
     EV <- coeffs[2]
-    b_Z = matrix(coeffs[3:length(coeffs)], ncol = 1)
-    Zb <- cbind( (-1)*Z1, Z2) %*% b_Z  
-    
     muW <- matrix(c(EU, EV), 2, 1)
-
+    
+    if (is.null(Z1) || is.null(Z2)) {
+        b_Z <- NULL
+        Zb <- 0
+    } else {
+        b_Z = matrix(coeffs[3:length(coeffs)], ncol = 1)
+        Zb <- cbind( (-1)*Z1, Z2) %*% b_Z  
+    }
     # Second moments
     shock_cov <- lp((DY - EU - EV*X[,2] - Zb)^2, 
                     cbind(1, 2*X[,2], X[,2]^2), 
                     X[,2] - X[,1],
-                    b = bw0)
-    VarU <- shock_cov[1]
-    CovUV <- shock_cov[2]
-    VarV <- shock_cov[3]
+                    b = shocks_bw)
 
-    SigmaW <- matrix(c(VarU, CovUV, CovUV, VarV), 2, 2)
+    shock_variances <- 
+    shock_covariances <- shock_cov[c(3)]
 
-    return(list(shock_means = muW, shock_cov = SigmaW, b_z = b_Z))
+    return(list(shock_means = muW, 
+                shock_variances = shock_cov[c(1,2)], 
+                shock_covariance = shock_cov[3],
+                fixed_coeffs = b_Z))
 }
 
 
@@ -157,33 +162,42 @@ compute_unconditional_moments <-
     vars <- c(mean(EA1sq_x, na.rm = TRUE) - means[1]^2,
             mean(EB1sq_x, na.rm = TRUE) - means[2]^2)
     covar <- c(mean(EA1B1_x, na.rm = TRUE) - means[1]*means[2])
-    return(list(means = means, variances = vars, covariance = covar))
+    return(list(random_coeff_means = means, 
+                random_coeff_variances = vars, 
+                random_coeff_covariance = covar))
 }
 
 
 # Estimates RCs under Normality assumptions
 estimate_main <- function(X, Z, Y, 
                     mean_rcond_bnd, cov_rcond_bnd,
-                    bw0,
+                    shocks_bw,
                     mean_bw1, mean_bw2, cov_bw1, cov_bw2,
                     q1_low, q1_high, q2_low, q2_high) {
 
     n_obs <- dim(Y)[1]
-    n_z <- dim(Z)[2]/2
-    Z1 <- Z[,seq(1, n_z)]
-    Z2 <- Z[,seq(n_z+1, 2*n_z)]
+    if (is.null(Z)) {
+        Z1 <- NULL
+        Z2 <- NULL
+    } else {
+        n_z <- dim(Z)[2]/2
+        Z1 <- Z[,seq(1, n_z)]
+        Z2 <- Z[,seq(n_z+1, 2*n_z)]
+    }
     
     # Shocks moments and fixed coeffs
-    tmp <- estimate_shocks_and_fixed(Y, X, Z1, Z2, bw0)
-    b_Z = tmp$b_z
-    shock_means = tmp$shock_means
-    shock_cov = tmp$shock_cov
+    shocks_and_fixed <- estimate_shocks_and_fixed(Y, X, Z1, Z2, shocks_bw)
+    b_Z = shocks_and_fixed$fixed_coeffs
 
     # Subtract terms involving fixed coeffs (i.e., Z_{t}'b_{t})
-    Z1b1 <- Z1 %*% b_Z[c(1,n_z), 1, drop = FALSE]
-    Z2b2 <- Z2 %*% b_Z[c(n_z+1, 2*n_z), 1, drop = FALSE]
-    Ytilde <- Y - cbind(Z1b1, Z2b2) 
-
+    if (is.null(Z)) {
+        Ytilde <- Y
+    } else {
+        Z1b1 <- Z1 %*% b_Z[c(1,n_z), 1, drop = FALSE]
+        Z2b2 <- Z2 %*% b_Z[c(n_z+1, 2*n_z), 1, drop = FALSE]
+        Ytilde <- Y - cbind(Z1b1, Z2b2)
+    }
+    
     # Conditional first moments 
     conditional_means <- 
         estimate_conditional_first_moments(X, Ytilde, Z,
@@ -211,14 +225,14 @@ estimate_main <- function(X, Z, Y,
     rc_moments <- compute_unconditional_moments(EA1_x, EB1_x, 
                                                EA1sq_x, EB1sq_x, EA1B1_x) 
 
-    return(c(tmp, rc_moments))
+    return(c(shocks_and_fixed, rc_moments))
 }
 
 
 # Main wrapper function
 fhhps <- function(Y1, Y2, X1, X2, Z1, Z2,
                  mean_rcond_bnd = .1, cov_rcond_bnd = .1, 
-                 bw0 = .1,
+                 shocks_bw = .1,
                  mean_bw1 = .1, mean_bw2 = .1, 
                  cov_bw1 = .1, cov_bw2 = .1,
                  q1_low = 0.01, q1_high = .99,
@@ -230,13 +244,13 @@ fhhps <- function(Y1, Y2, X1, X2, Z1, Z2,
     X <- matrix(cbind(X1, X2), n_obs, 2)
     
     if (is.null(Z1) || is.null(Z2)) {
-        Z <- matrix(0, n_obs, 2)
+        Z <- NULL
     } else {
         Z <- matrix(cbind(Z1, Z2), n_obs, 2*dim(Z1)[2])
     }
     
     # Estimate moments
-    moments <- estimate_main(X, Z, Y, mean_rcond_bnd, cov_rcond_bnd, bw0, 
+    moments <- estimate_main(X, Z, Y, mean_rcond_bnd, cov_rcond_bnd, shocks_bw, 
                 mean_bw1, mean_bw2, cov_bw1, cov_bw2, 
                 q1_low, q1_high, q2_low, q2_high) 
 
@@ -249,7 +263,7 @@ fhhps <- function(Y1, Y2, X1, X2, Z1, Z2,
 
 #### Auxiliary function generates data satisfying model assumptions
 
-create_data <- function(n_obs) {
+create_data <- function(n_obs, with_Z = TRUE) {
 
     # Draw coefficients for first period
     mAB <- c(1,2)
@@ -267,7 +281,7 @@ create_data <- function(n_obs) {
     # X1 correlated with A,B
     X1 <-  .2*A + .5*B + 
         .5*A^2 - .2*B^2 + 
-        rnorm(n = 1,mean = 0, sd = sqrt(5))
+rnorm(n = 1,mean = 0, sd = sqrt(5))
     
     # De-mean X1
     X1 <- X1 - mean(X1) 
@@ -279,10 +293,17 @@ create_data <- function(n_obs) {
 
 
     # Draw Z1 and Z2
-    Z11 = rnorm(n  = n_obs, mean = 3, sd = 2)
-    Z21 = rnorm(n  = n_obs, mean = 4, sd = 2)
-    Z12 = rnorm(n  = n_obs, mean = 3, sd = 2)
-    Z22 = rnorm(n  = n_obs, mean = 4, sd = 2)
+    if (with_Z) {
+        Z11 = rnorm(n  = n_obs, mean = 3, sd = 2)
+        Z21 = rnorm(n  = n_obs, mean = 4, sd = 2)
+        Z12 = rnorm(n  = n_obs, mean = 3, sd = 2)
+        Z22 = rnorm(n  = n_obs, mean = 4, sd = 2)
+    } else {
+        Z11 = 0
+        Z21 = 0
+        Z12 = 0
+        Z22 = 0
+    }
 
     # Compute dependent variable
     Y1 <- A + B*X1 + 1*Z11 + 2*Z21
