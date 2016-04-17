@@ -2,7 +2,7 @@ library(MASS)
 library(Rcpp)
 library(RcppArmadillo)
 library(plyr)
-
+library(caret)
 
 #Get C++ functions (takes about a few moments to compile)
 sourceCpp("cpp_functions.cpp")
@@ -10,26 +10,38 @@ sourceCpp("cpp_functions.cpp")
 # Definitions
 i1 <- complex(imaginary = 1)
 
+# Local polynomial regression 
+lp <- function(YY, XX, xx, b) {
+    K <- diag(dnorm(c(xx)/b))
+    B <- solve(t(XX) %*% K %*% XX) %*% (t(XX) %*% K %*% YY)
+    return(B)
+}
+
+lp_error <- function(YY, XX, betahat, xx, bw) {
+    M <- YY - XX %*% betahat
+    K <- dnorm(xx, sd = bw)
+    return(mean(M^2*K))
+}
+
+
+
 # Gamma matrices
 g1 <- function(x) matrix(c(1,1,x[1],x[2]), 2, 2)
 g1inv <- function(x)  solve(g1(x))
 g2 <- function(x) matrix(c(0, 1, 0, x[2]), 2, 2)
 g3 <- function(x)  g1inv(x) %*% g2(x)
 
-# Local polynomial regression 
-lp <- function(YY, XX, xx, b) {
-    K <- diag(dnorm((xx)/b))
-    B <- solve(t(XX) %*% K %*% XX) %*% (t(XX) %*% K %*% YY)
-    return(B)
-}
 
 
 # Shock moments and fixed coefficients beta_{t}
-estimate_shocks_and_fixed <- function(Y, X, Z1, Z2, shocks_bw) {
+estimate_shocks_and_fixed <- function(Y1, Y2, X1, X2, Z1, Z2, shocks_bw) {
 
     # First moments
-    DY <- Y[,2] - Y[,1]
-    coeffs <- lp(DY, cbind(1, X[,2], (-1)*Z1, Z2), X[,2] - X[,1], b = shocks_bw)
+    DY <- Y2 - Y1
+    coeffs <- lp(YY = DY, 
+                XX = cbind(1, X2, (-1)*Z1, Z2), 
+                xx = X2 - X1, 
+                b = shocks_bw)
     EU <- coeffs[1]
     EV <- coeffs[2]
     muW <- matrix(c(EU, EV), 2, 1)
@@ -42,12 +54,12 @@ estimate_shocks_and_fixed <- function(Y, X, Z1, Z2, shocks_bw) {
         Zb <- cbind( (-1)*Z1, Z2) %*% b_Z  
     }
     # Second moments
-    shock_cov <- lp((DY - EU - EV*X[,2] - Zb)^2, 
-                    cbind(1, 2*X[,2], X[,2]^2), 
-                    X[,2] - X[,1],
+    shock_cov <- lp((DY - EU - EV*X2 - Zb)^2, 
+                    cbind(1, 2*X2, X2^2), 
+                    X2 - X1,
                     b = shocks_bw)
 
-    shock_variances <- 
+    shock_variances <- shock_cov[c(1,2)]
     shock_covariances <- shock_cov[c(3)]
 
     return(list(shock_means = muW, 
@@ -288,7 +300,7 @@ rnorm(n = 1,mean = 0, sd = sqrt(5))
     X_sd <- sd(X1)
     
     # X2 is not correlated with A,B, but has same mean (zero) and std. dev.
-    X2 <- rnorm(n = n_obs, mean = 0, sd = X_sd)
+    X2 <- matrix(rnorm(n = n_obs, mean = 0, sd = X_sd), n_obs, 1)
     X <- cbind(X1, X2)
 
 
@@ -321,7 +333,59 @@ rnorm(n = 1,mean = 0, sd = sqrt(5))
     dataset$W <- W
     dataset$Z1 <- cbind(Z11, Z21)
     dataset$Z2 <- cbind(Z12, Z22)
+    dataset$beta_1 <- c(1, 2)
+    dataset$beta_2 <- c(1, 2)
+
 
     return(dataset)
 }
+
+estimate_shocks_and_fixed_CV <- function(Y1,Y2,X1,X2,Z1,Z2, 
+                                         shocks_bws, n_folds = 5) {
+    
+    n_obs <- dim(Y1)[1]
+    folds <- createFolds(y = seq(n_obs), k = n_folds)
+
+    errors <- matrix(0, length(shocks_bws), n_folds)
+    colnames(errors) <- names(folds)
+    rownames(errors) <- shocks_bws
+
+    for (i in seq_along(shocks_bws)) {
+    bw <- shocks_bws[i]
+        
+        for (j in seq_along(folds)) {
+            idx <- folds[[j]]
+        
+            Y1_test <- Y1[idx,,drop = F]
+            Y2_test <- Y2[idx,,drop = F]
+            X1_test <- X1[idx,,drop = F]
+            X2_test <- X2[idx,,drop = F]
+            Z1_test <- Z1[idx,,drop = F]
+            Z2_test <- Z2[idx,,drop = F]
+            Y1_train <- Y1[-idx,,drop = F]
+            X1_train <- X1[-idx,,drop = F]
+            Y2_train <- Y2[-idx,,drop = F]
+            X2_train <- X2[-idx,,drop = F]
+            Z1_train <- Z1[-idx,,drop = F]
+            Z2_train <- Z2[-idx,,drop = F]
+
+            shocks_and_fixed <- estimate_shocks_and_fixed(Y1 = Y1_train, 
+                                                         Y2 = Y2_train, 
+                                                         X1 = X1_train, 
+                                                         X2 = X2_train, 
+                                                         Z1 = Z1_train, 
+                                                         Z2 = Z2_train, 
+                                                         bw)
+            
+           errors[i, j] <-  lp_error(YY = Y2_test - Y1_test,
+                                    XX = cbind(1, X2_test, (-1)*Z1_test, Z2_test),
+                                    xx = X2_test - X1_test,
+                                    betahat <- c(shocks_and_fixed$shock_means,
+                                                shocks_and_fixed$fixed_coeffs),
+                                     bw = bw)
+        }
+    }
+    return(errors)
+}
+
 
