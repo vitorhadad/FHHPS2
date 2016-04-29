@@ -59,103 +59,86 @@ estimate_shocks_and_fixed <- function(Y1, Y2, X1, X2, Z1, Z2, shocks_bw) {
                     X2 - X1,
                     b = shocks_bw)
 
-    shock_variances <- shock_cov[c(1,2)]
-    shock_covariances <- shock_cov[c(3)]
-
     return(list(shock_means = muW, 
-                shock_variances = shock_cov[c(1,2)], 
-                shock_covariance = shock_cov[3],
+                shock_variances = shock_cov[c(1,3)], 
+                shock_covariance = shock_cov[2],
                 fixed_coeffs = b_Z))
 }
 
 
-estimate_conditional_first_moments <- function(X, Y, Z, lb, bw1, bw2) {
 
-    n_obs <- dim(Y)[1]
-    XZ <- cbind(X, Z)
+estimate_conditional_first_moments <- function(Y1, Y2, X1, X2, Z1, Z2,
+                                                  lb, bw_lower, bw_upper, n_bws) {
+
+    n_obs <- dim(Y1)[1]
+    XZ <- cbind(X1, X2, Z1, Z2)
     n_regs <- dim(XZ)[2]
 
-    results <- matrix(0, 2, n_obs)
+    cmoments <- matrix(0, 2, n_obs)
 
-    for (i in seq(n_obs)) {
-        
-        Y1 <- matrix(Y[-i,1], n_obs-1, 1)
-        Y2 <- matrix(Y[-i,2], n_obs-1, 1)
-        W <- matrix(cbind(XZ[-i,]), n_obs-1, n_regs)
-        w <- matrix(c(XZ[i,]), 1, n_regs)
-        w_xx <- matrix(c(X[i,2], X[i,2], Z[i,]), 1, n_regs)
-         
-        EY1 <- kreg_R(Y1, W, w, bw1)
-        EY2 <- kreg_R(Y2, W, w, bw1)
-        EDY2 <- kreg_R(Y2 - Y1, W, w_xx, bw2)
+    # Kernel regression (auto search for optimal bandwidth)
+    EY1 <- kreg_opt(Y1, X1, X2, Z1, Z2, bw_lower = bw_lower, 
+                        bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
+    EY2 <- kreg_opt(Y2, X1, X2, Z1, Z2, bw_lower = bw_lower, 
+                        bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
+    EDY2 <- kreg_opt(Y2 - Y1, X1, X2, Z1, Z2, bw_lower = bw_lower, 
+                        bw_upper = bw_upper, n_bws = n_bws, at_xx = TRUE)$opt_estimates
                
 
-        b <- matrix(c(EY1, EY2 - EDY2), 2, 1)
-        A <- matrix(c(1, 1, X[i,1], X[i,2]), 2, 2)
-
-        results[,i] <- Re(solve(A) %*% b)	
-    }
+    # Invert matrices to get results
+    for (i in seq(n_obs)) {
+        b <- matrix(c(EY1[i], EY2[i] - EDY2[i]), 2, 1)
+        A <- matrix(c(1, 1, X1[i], X2[i]), 2, 2) 
     
-    if (rcond(A) > lb) { 
-	results[,i] <- Re(solve(A) %*% b)	
-    } else {
-	results[,i] <- NaN
+        if (rcond(A) > lb) { 
+	    cmoments[,i] <- Re(solve(A) %*% b)	
+        } else {
+	    cmoments[,i] <- NaN
+        }
     }
-
-    return(results)
+    return(cmoments)
 }
 
 
 
-estimate_conditional_second_moments <- 
-    function(X, Y, Z, EA1_x, EB1_x, lb, bw1, bw2) {
 
-    n_obs <- dim(Y)[1]
-    XZ <- cbind(X, Z)
-    n_regs <- dim(XZ)[2]
+estimate_conditional_second_moments <- 
+    function(Y1, Y2, X1, X2, Z1, Z2, EA1_x, EB1_x, lb, bw_lower, bw_upper, n_bws) {
     
-    results <- matrix(0, 3, n_obs)
-    rconds <- rep(0, n_obs)
+    n_obs <- dim(Y1)[1]
+    cmoments <- matrix(0, 3, n_obs)
+    
+    # Regressions
+    EY1 <- kreg_opt(Y1, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
+    EDY2 <- kreg_opt(Y2 - Y1, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = TRUE)$opt_estimates
+    EY1sq <- kreg_opt(Y1^2, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
+    EY2sq <- kreg_opt(Y2^2, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
+    EY1Y2 <- kreg_opt(Y1*Y2, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
+    EDY2sq <- kreg_opt((Y2 - Y1)^2, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = TRUE)$opt_estimates
+
+    EA1_B1X2_x = EA1_x - EB1_x*X2
+
+    
     for (i in seq(n_obs)) {
 
-	# Create regressor matrices
-        W <- matrix(cbind(XZ[-i,]), n_obs-1, n_regs)
-        w <- matrix(c(XZ[i,]), 1, n_regs)
-        w_xx <- matrix(c(X[i,2], X[i,2], Z[i,]), 1, n_regs)
-
-	Y1 <- matrix(Y[-i,1], n_obs-1, 1)
-	Y2 <- matrix(Y[-i,2], n_obs-1, 1)
-	DY2 <- matrix(Y[-i,2] - Y[-i,1], n_obs-1, 1)
-
-	# Conditional means
-	EY1 <- kreg_R(Y1, W, w, bw1)	
-	EDY2 <- kreg_R(DY2, W, w_xx, bw2)
-        EY1sq <- kreg_R(Y1^2, W, w, bw1)	
-        EY2sq <- kreg_R(Y2^2, W, w, bw1)
-        EY1Y2 <- kreg_R(Y1*Y2, W, w, bw1)
-        EDY2sq <- kreg_R(DY2^2, W, w_xx, bw2)
-
-        EA1_B1X2_x = EA1_x[i] - EB1_x[i]*X[i,2]
-
         # Invert
-        b <- matrix(c(EY1sq, 
-                    EY2sq - EDY2sq - 2*EA1_B1X2_x*EDY2,
-                    EY1Y2 - EY1*EDY2), 3, 1)
-        A <- matrix(c(1, X[i,1]^2, 2*X[i,1],
-                    1, X[i,2]^2, 2*X[i,2],
-                    1, X[i,1]*X[i,2], X[i,1] + X[i,2]), 
+        b <- matrix(c(EY1sq[i], 
+                    EY2sq[i] - EDY2sq[i] - 2*EA1_B1X2_x[i]*EDY2[i],
+                    EY1Y2[i] - EY1[i]*EDY2[i]), 3, 1)
+        A <- matrix(c(1, X1[i]^2, 2*X1[i],
+                    1, X2[i]^2, 2*X2[i],
+                    1, X1[i]*X2[i], X1[i] + X2[i]), 
                     byrow = TRUE, 3, 3)
         
-        rconds[i] <- rcond(A)
         # Include in answer only if acceptable rcond
         if (rcond(A) > lb) { 
-                results[,i] <- Re(solve(A) %*% b)	
+            cmoments[,i] <- Re(solve(A) %*% b)	
         } else {
-                results[,i] <- NaN
+            cmoments[,i] <- NaN
         }
     }
 	
-    return(results)
+    return(cmoments)
 }
 
 
@@ -181,52 +164,42 @@ compute_unconditional_moments <-
 
 
 # Estimates RCs under Normality assumptions
-estimate_main <- function(X, Z, Y, 
+estimate_main <- function(Y1,Y2, X1, X2, Z1, Z2, 
                     mean_rcond_bnd, cov_rcond_bnd,
-                    shocks_bw,
-                    mean_bw1, mean_bw2, cov_bw1, cov_bw2,
+                    bw_lower, bw_upper, n_bws,
                     q1_low, q1_high, q2_low, q2_high) {
 
-    n_obs <- dim(Y)[1]
-    if (is.null(Z)) {
-        Z1 <- NULL
-        Z2 <- NULL
-    } else {
-        n_z <- dim(Z)[2]/2
-        Z1 <- Z[,seq(1, n_z)]
-        Z2 <- Z[,seq(n_z+1, 2*n_z)]
-    }
     
     # Shocks moments and fixed coeffs
-    shocks_and_fixed <- estimate_shocks_and_fixed(Y, X, Z1, Z2, shocks_bw)
-    b_Z = shocks_and_fixed$fixed_coeffs
+    shocks_bw <- estimate_shocks_and_fixed_optimal_bw(Y1, Y2, X1, X2, Z1, Z2, bw_lower, bw_upper, n_bws)
+    shocks_and_fixed <-  estimate_shocks_and_fixed(Y1, Y2, X1, X2, Z1, Z2, shocks_bw)
+    b_Z <- shocks_and_fixed$fixed_coeffs
+    n_z <- length(b_Z)/2
 
     # Subtract terms involving fixed coeffs (i.e., Z_{t}'b_{t})
-    if (is.null(Z)) {
-        Ytilde <- Y
+    if (is.null(Z1) || is.null(Z2)) {
+        Y1tilde <- Y1
+        Y2tilde <- Y2
     } else {
-        Z1b1 <- Z1 %*% b_Z[c(1,n_z), 1, drop = FALSE]
-        Z2b2 <- Z2 %*% b_Z[c(n_z+1, 2*n_z), 1, drop = FALSE]
-        Ytilde <- Y - cbind(Z1b1, Z2b2)
+        Y1tilde <- Y1 - Z1 %*% b_Z[c(1,n_z), 1, drop = FALSE]    
+        Y2tilde <- Y2 -  Z2 %*% b_Z[c(n_z+1, 2*n_z), 1, drop = FALSE]
     }
     
     # Conditional first moments 
     conditional_means <- 
-        estimate_conditional_first_moments(X, Ytilde, Z,
-            lb = mean_rcond_bnd, 
-            bw1 = mean_bw1, 
-            bw2 = mean_bw2)
+        estimate_conditional_first_moments(Y1tilde, Y2tilde, X1, X2, Z1, Z2,
+            lb = mean_rcond_bnd, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws)
 
     # Trim outliers 
     EA1_x <- outlier_to_nan(x = conditional_means[1,], q1_low, q1_high)
     EB1_x <- outlier_to_nan(x = conditional_means[2,], q1_low, q1_high)
 
     # Conditional second moments
-    conditional_second_moments <- estimate_conditional_second_moments(X, Ytilde, Z, 
+    conditional_second_moments <- 
+        estimate_conditional_second_moments(Y1tilde, Y2tilde, X1, X2, Z1, Z2, 
             EA1_x = EA1_x, EB1_x = EB1_x,
-            lb = cov_rcond_bnd, 
-            bw1 = cov_bw1, 
-            bw2 = cov_bw2)
+            lb = cov_rcond_bnd, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws)
+
    
     # Trim outliers
     EA1sq_x <- outlier_to_nan(x = conditional_second_moments[1,], q2_low, q2_high)
@@ -244,28 +217,16 @@ estimate_main <- function(X, Z, Y,
 # Main wrapper function
 fhhps <- function(Y1, Y2, X1, X2, Z1, Z2,
                  mean_rcond_bnd = .1, cov_rcond_bnd = .1, 
-                 shocks_bw = .1,
-                 mean_bw1 = .1, mean_bw2 = .1, 
-                 cov_bw1 = .1, cov_bw2 = .1,
-                 q1_low = 0.01, q1_high = .99,
-                 q2_low = 0.00, q2_high = .98) {
+                 bw_lower = .1, bw_upper = 1.5, n_bws = 20, 
+                 q1_low = 0.01, q1_high = .99, q2_low = 0.00, q2_high = .98) {
      
-    # Ensure appropriate matrix form
-    n_obs <- length(Y1)
-    Y <- matrix(cbind(Y1, Y2), n_obs, 2)    
-    X <- matrix(cbind(X1, X2), n_obs, 2)
-    
-    if (is.null(Z1) || is.null(Z2)) {
-        Z <- NULL
-    } else {
-        Z <- matrix(cbind(Z1, Z2), n_obs, 2*dim(Z1)[2])
-    }
-    
-    # Estimate moments
-    moments <- estimate_main(X, Z, Y, mean_rcond_bnd, cov_rcond_bnd, shocks_bw, 
-                mean_bw1, mean_bw2, cov_bw1, cov_bw2, 
-                q1_low, q1_high, q2_low, q2_high) 
 
+    # Estimate moments
+    moments <- estimate_main(Y1,Y2, X1, X2, Z1, Z2, 
+                    mean_rcond_bnd, cov_rcond_bnd,
+                    bw_lower, bw_upper, n_bws,
+                    q1_low, q1_high, q2_low, q2_high) 
+    
     return(moments)
 }
 
@@ -340,52 +301,82 @@ rnorm(n = 1,mean = 0, sd = sqrt(5))
     return(dataset)
 }
 
-estimate_shocks_and_fixed_CV <- function(Y1,Y2,X1,X2,Z1,Z2, 
-                                         shocks_bws, n_folds = 5) {
+
+
+
+estimate_shocks_and_fixed_optimal_bw <- function(Y1, Y2, X1, X2, Z1, Z2, 
+                                         bw_lower, bw_upper, n_bws) {
     
     n_obs <- dim(Y1)[1]
-    folds <- createFolds(y = seq(n_obs), k = n_folds)
+    shocks_bws <- seq(bw_lower, bw_upper, length.out = n_bws)
+    
+    errors <- matrix(0, n_obs, n_bws)
 
-    errors <- matrix(0, length(shocks_bws), n_folds)
-    colnames(errors) <- names(folds)
-    rownames(errors) <- shocks_bws
-
-    for (i in seq_along(shocks_bws)) {
-    bw <- shocks_bws[i]
-        
-        for (j in seq_along(folds)) {
-            idx <- folds[[j]]
-        
-            Y1_test <- Y1[idx,,drop = F]
-            Y2_test <- Y2[idx,,drop = F]
-            X1_test <- X1[idx,,drop = F]
-            X2_test <- X2[idx,,drop = F]
-            Z1_test <- Z1[idx,,drop = F]
-            Z2_test <- Z2[idx,,drop = F]
-            Y1_train <- Y1[-idx,,drop = F]
-            X1_train <- X1[-idx,,drop = F]
-            Y2_train <- Y2[-idx,,drop = F]
-            X2_train <- X2[-idx,,drop = F]
-            Z1_train <- Z1[-idx,,drop = F]
-            Z2_train <- Z2[-idx,,drop = F]
-
-            shocks_and_fixed <- estimate_shocks_and_fixed(Y1 = Y1_train, 
-                                                         Y2 = Y2_train, 
-                                                         X1 = X1_train, 
-                                                         X2 = X2_train, 
-                                                         Z1 = Z1_train, 
-                                                         Z2 = Z2_train, 
-                                                         bw)
+    for (i in seq(n_obs)) {
+        for (j in seq(n_bws)) { 
+            shocks_and_fixed <- estimate_shocks_and_fixed(Y1 = Y1[-i,,drop=F], 
+                                                         Y2 = Y2[-i,,drop=F], 
+                                                         X1 = X1[-i,,drop=F], 
+                                                         X2 = X2[-i,,drop=F], 
+                                                         Z1 = Z1[-i,,drop=F], 
+                                                         Z2 = Z2[-i,,drop=F], 
+                                                         shocks_bw = shocks_bws[j])
             
-           errors[i, j] <-  lp_error(YY = Y2_test - Y1_test,
-                                    XX = cbind(1, X2_test, (-1)*Z1_test, Z2_test),
-                                    xx = X2_test - X1_test,
-                                    betahat <- c(shocks_and_fixed$shock_means,
+            errors[i, j] <-  lp_error(YY = Y2[i] - Y1[i],
+                                    XX = cbind(1, X2[-i,], (-1)*Z1[-i,], Z2[-i,]),
+                                    xx = X2[i] - X1[i],
+                                    betahat = c(shocks_and_fixed$shock_means,
                                                 shocks_and_fixed$fixed_coeffs),
-                                     bw = bw)
+                                    bw = shocks_bws[j])
         }
     }
-    return(errors)
+    mse <- apply(errors, 2, function(x) mean(x, na.rm = TRUE))
+    return(shocks_bws[which.min(mse)])
 }
+
+
+
+
+kreg_opt <- function(Y, X1, X2, Z1, Z2, 
+            bw_lower = 0.05, bw_upper = .5, n_bws = 10, 
+            at_xx = FALSE) {
+
+   n_obs <- dim(Y)[1]
+   sqerror <- matrix(0, n_obs, n_bws)
+   estimates <- matrix(0, n_obs, n_bws) 
+   bws <- seq(bw_lower, bw_upper, length.out = n_bws)
+   W <- cbind(X1, X2, Z1, Z2)
+   n_regs <- dim(W)[2]
+
+   # Compute the best bandwidth via LOOCV
+   for (i in seq(n_obs)) {
+        Y_j <- matrix(Y[-i], n_obs-1, 1)
+        W_j <- matrix(W[-i,,drop=F], n_obs-1, n_regs)
+
+        if (at_xx) {
+            w <- matrix(c(X2[i], X2[i], Z1[i,], Z2[i,]), 1, n_regs)
+        } else {
+            w <- matrix(c(W[i,,drop=F]), 1, n_regs)
+        }
+
+        for (j in seq(n_bws)) {
+            estimates[i,j] <- Re(kreg_R(Y_j, W_j, w, bws[j]))  
+            sqerror[i,j] <- (Y[i] - estimates[i,j])**2
+        }
+    }
+
+   # Return optimal bandwidth
+   mse <- apply(sqerror, 2, function(x) mean(x, na.rm = TRUE))
+   return(list(opt_estimates = estimates[,which.min(mse)],
+               opt_bw = bws[which.min(mse)], 
+               bws = bws,
+               mse = mse,
+               opt_mse = min(mse, na.rm = TRUE)))
+}
+
+
+
+
+
 
 
