@@ -3,9 +3,13 @@ library(Rcpp)
 library(RcppArmadillo)
 library(plyr)
 library(caret)
+library(doParallel)
+library(foreach)
+library(mgcv)
+library(gam)
 
 #Get C++ functions (takes about a few moments to compile)
-sourceCpp("cpp_functions.cpp")
+#sourceCpp("cpp_functions.cpp")
 
 # Definitions
 i1 <- complex(imaginary = 1)
@@ -67,25 +71,19 @@ estimate_shocks_and_fixed <- function(Y1, Y2, X1, X2, Z1, Z2, shocks_bw) {
 
 
 
-estimate_conditional_first_moments <- function(Y1, Y2, X1, X2, Z1, Z2,
-                                                  lb, bw_lower, bw_upper, n_bws) {
+estimate_conditional_first_moments <- function(Y1, Y2, X1, X2, Z1, Z2, lb) {
 
     n_obs <- dim(Y1)[1]
     XZ <- cbind(X1, X2, Z1, Z2)
     n_regs <- dim(XZ)[2]
 
-    cmoments <- matrix(0, 2, n_obs)
-
-    # Kernel regression (auto search for optimal bandwidth)
-    EY1 <- kreg_opt(Y1, X1, X2, Z1, Z2, bw_lower = bw_lower, 
-                        bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
-    EY2 <- kreg_opt(Y2, X1, X2, Z1, Z2, bw_lower = bw_lower, 
-                        bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
-    EDY2 <- kreg_opt(Y2 - Y1, X1, X2, Z1, Z2, bw_lower = bw_lower, 
-                        bw_upper = bw_upper, n_bws = n_bws, at_xx = TRUE)$opt_estimates
+    # Local regression
+    EY1 <- fit_model(Y1, X1, X2, Z1, Z2, at_xx = FALSE)
+    EY2 <- fit_model(Y2, X1, X2, Z1, Z2, at_xx = FALSE)
+    EDY2 <- fit_model(Y2 - Y1, X1, X2, Z1, Z2, at_xx = TRUE)
                
-
     # Invert matrices to get results
+    cmoments <- matrix(0, 2, n_obs)
     for (i in seq(n_obs)) {
         b <- matrix(c(EY1[i], EY2[i] - EDY2[i]), 2, 1)
         A <- matrix(c(1, 1, X1[i], X2[i]), 2, 2) 
@@ -100,21 +98,19 @@ estimate_conditional_first_moments <- function(Y1, Y2, X1, X2, Z1, Z2,
 }
 
 
-
-
 estimate_conditional_second_moments <- 
-    function(Y1, Y2, X1, X2, Z1, Z2, EA1_x, EB1_x, lb, bw_lower, bw_upper, n_bws) {
+    function(Y1, Y2, X1, X2, Z1, Z2, EA1_x, EB1_x, lb) {
     
     n_obs <- dim(Y1)[1]
     cmoments <- matrix(0, 3, n_obs)
     
-    # Regressions
-    EY1 <- kreg_opt(Y1, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
-    EDY2 <- kreg_opt(Y2 - Y1, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = TRUE)$opt_estimates
-    EY1sq <- kreg_opt(Y1^2, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
-    EY2sq <- kreg_opt(Y2^2, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
-    EY1Y2 <- kreg_opt(Y1*Y2, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = FALSE)$opt_estimates
-    EDY2sq <- kreg_opt((Y2 - Y1)^2, X1, X2, Z1, Z2, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws, at_xx = TRUE)$opt_estimates
+    # Local Regressions
+    EY1 <- fit_model(Y1, X1, X2, Z1, Z2)
+    EDY2 <- fit_model(Y2 - Y1, X1, X2, Z1, Z2, at_xx = TRUE) 
+    EY1sq <- fit_model(Y1^2, X1, X2, Z1, Z2) 
+    EY2sq <- fit_model(Y2^2, X1, X2, Z1, Z2)
+    EY1Y2 <- fit_model(Y1*Y2, X1, X2, Z1, Z2)
+    EDY2sq <- fit_model((Y2 - Y1)^2, X1, X2, Z1, Z2, at_xx = TRUE)
 
     EA1_B1X2_x = EA1_x - EB1_x*X2
 
@@ -187,8 +183,8 @@ estimate_main <- function(Y1,Y2, X1, X2, Z1, Z2,
     
     # Conditional first moments 
     conditional_means <- 
-        estimate_conditional_first_moments(Y1tilde, Y2tilde, X1, X2, Z1, Z2,
-            lb = mean_rcond_bnd, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws)
+        estimate_conditional_first_moments(Y1tilde, Y2tilde, X1, X2, Z1, Z2, 
+                                           lb = mean_rcond_bnd)
 
     # Trim outliers 
     EA1_x <- outlier_to_nan(x = conditional_means[1,], q1_low, q1_high)
@@ -197,8 +193,7 @@ estimate_main <- function(Y1,Y2, X1, X2, Z1, Z2,
     # Conditional second moments
     conditional_second_moments <- 
         estimate_conditional_second_moments(Y1tilde, Y2tilde, X1, X2, Z1, Z2, 
-            EA1_x = EA1_x, EB1_x = EB1_x,
-            lb = cov_rcond_bnd, bw_lower = bw_lower, bw_upper = bw_upper, n_bws = n_bws)
+            EA1_x = EA1_x, EB1_x = EB1_x, lb = cov_rcond_bnd)
 
    
     # Trim outliers
@@ -337,46 +332,38 @@ estimate_shocks_and_fixed_optimal_bw <- function(Y1, Y2, X1, X2, Z1, Z2,
 
 
 
-kreg_opt <- function(Y, X1, X2, Z1, Z2, 
-            bw_lower = 0.05, bw_upper = .5, n_bws = 10, 
-            at_xx = FALSE) {
-
-   n_obs <- dim(Y)[1]
-   sqerror <- matrix(0, n_obs, n_bws)
-   estimates <- matrix(0, n_obs, n_bws) 
-   bws <- seq(bw_lower, bw_upper, length.out = n_bws)
-   W <- cbind(X1, X2, Z1, Z2)
-   n_regs <- dim(W)[2]
-
-   # Compute the best bandwidth via LOOCV
-   for (i in seq(n_obs)) {
-        Y_j <- matrix(Y[-i], n_obs-1, 1)
-        W_j <- matrix(W[-i,,drop=F], n_obs-1, n_regs)
-
-        if (at_xx) {
-            w <- matrix(c(X2[i], X2[i], Z1[i,], Z2[i,]), 1, n_regs)
-        } else {
-            w <- matrix(c(W[i,,drop=F]), 1, n_regs)
-        }
-
-        for (j in seq(n_bws)) {
-            estimates[i,j] <- Re(kreg_R(Y_j, W_j, w, bws[j]))  
-            sqerror[i,j] <- (Y[i] - estimates[i,j])**2
-        }
+fit_model <- function(Y, X1, X2, Z1, Z2, at_xx = FALSE) 
+{
+    if (is.null(Z1) || is.null(Z2)) {
+        dataset <- data.frame(Y = Y, X1 = X1, X2 = X2)
+        fmla <- formula(Y ~ s(X1) + s(X2))
+    } else {
+        dataset <- data.frame(Y = Y, X1 = X1, X2 = X2, Z1 = Z1, Z2 = Z2)
+        regressors <- foreach(col=colnames(dataset), .combine=c) %:% 
+        when(col != "Y") %do% 
+            sprintf("s(%s)", col) 
+        fmla <- as.formula(paste(c("Y ~ ", paste(regressors, collapse = " + "))))
     }
-
-   # Return optimal bandwidth
-   mse <- apply(sqerror, 2, function(x) mean(x, na.rm = TRUE))
-   return(list(opt_estimates = estimates[,which.min(mse)],
-               opt_bw = bws[which.min(mse)], 
-               bws = bws,
-               mse = mse,
-               opt_mse = min(mse, na.rm = TRUE)))
+    model <- gam(fmla, data = dataset)
+    estimates <- loo_predict(model, dataset, at_xx)
+    return(as.matrix(estimates))
 }
 
 
-
-
-
-
+loo_predict <- function(obj, dataset, at_xx) {
+    registerDoParallel(cores = detectCores())
+    print("Using this number of cores")
+    print(getDoParWorkers())
+    yhat <- foreach(i = 1:nrow(dataset), .combine = rbind) %dopar% {
+        
+        newdata = dataset[i,]
+        if (at_xx) newdata["X1"] = newdata["X2"] 
+        predict(update(object = obj, 
+                       formula. = obj$formula,
+                       data = dataset[-i, ]), 
+                newdata = newdata, 
+                type = "response")
+    }
+    return(data.frame(result = yhat[, 1], row.names = NULL))
+}
 
