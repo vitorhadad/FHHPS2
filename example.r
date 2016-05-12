@@ -1,39 +1,43 @@
 rm(list = ls())
-source("functions.r")
+source("functions2.r")
 
-n_obs = 5000
 
 # Generate Data 
-dataset <- create_data(n_obs = n_obs, with_Z = TRUE)
-X1 = dataset$X1
-X2 = dataset$X2
-Z1 = dataset$Z1
-Z2 = dataset$Z2
-Y1 = dataset$Y1
-Y2 = dataset$Y2
-bw_lower = .1
-bw_upper = 1.2
-n_bws = 9
-lb = 0.1
-q1_low = 0.01
-q2_low = 0.00
-q1_high = .99
-q1_high = 0.98
+n_obs_grid <- c(500, 1000, 2000)
+det_bnds <- c(.01, .05, .1, .2)
+modulus_bnds <- c(.01, .05, .1, .2)
+n_tts <- c(7, 10, 15)
+k <- 1
+filename = "sim_results_with_cf.txt"
 
+# Parameter grid
+params <- expand.grid(n_obs_grid, det_bnds, modulus_bnds, n_tts)
+# Shuffled
+params <- params[sample(nrow(params)),]
+
+while (TRUE) {
+
+n_obs <- params[k,1]
+det_bnd <- params[k,2]
+modulus_bnd <- params[k,3]
+n_tt <- params[k,4]
 
 # Generate Data 
 data <- create_data(n_obs = n_obs, with_Z = TRUE)
     
 # Estimate
+t <- proc.time()
 output <- fhhps(X1 = dataset$X1, X2 = dataset$X2,
                 Z1 = dataset$Z1, Z2 = dataset$Z2,
                 Y1 = dataset$Y1, Y2 = dataset$Y2, 
-                mean_rcond_bnd = lb, cov_rcond_bnd = lb, 
-                bw_lower = .1, bw_upper = 1.2, n_bws = 9)
+                det_bnd = det_bnd, modulus_bnd = modulus_bnd, 
+                n_tt = n_tt)
+t <- proc.time() - t
 
-write.table(rbind(c(n_obs, lb, unlist(output))), 
-            file = "sim_results.txt", append = TRUE,
-            row.names = FALSE, col.names = FALSE,
+write.table(rbind(c(n_obs, det_bnd, modulus_bnd, n_tt, unlist(output), t[3])), 
+            file = filename, append = TRUE,
+            row.names = FALSE, col.names = if (file.exists(filename)) FALSE else TRUE,
             quote = FALSE) 
 
-
+k = k + 1
+}
