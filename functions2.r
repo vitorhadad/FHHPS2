@@ -8,11 +8,9 @@ library(foreach)
 library(mgcv)
 library(gamclass)
 
-#Get C++ functions (takes about a few moments to compile)
-#sourceCpp("cpp_functions.cpp")
-
 # Definitions
 i1 <- complex(imaginary = 1)
+s = mgcv:::s # Avoid conflict with others packages
 
 # Local polynomial regression 
 lp <- function(YY, XX, xx, b) {
@@ -71,6 +69,7 @@ estimate_shocks_and_fixed <- function(Y1, Y2, X1, X2, Z1, Z2, shocks_bw) {
 
     
 normal_cf <- function(muAB, chol_sigmaAB, tt) {
+    tt <- matrix(tt, 1, 2)
     S <-  matrix(c(chol_sigmaAB[1],0,chol_sigmaAB[2],chol_sigmaAB[3]),2,2)
     sigmaAB <- t(S) %*% S
     return(exp(1i * tt %*% muAB - .5 * tt %*% sigmaAB %*% t(tt)))
@@ -78,7 +77,7 @@ normal_cf <- function(muAB, chol_sigmaAB, tt) {
 
 
 # Integrates the ratio over t  
-compute_rhs <- function(Y1, Y2, X1, X2, Z1, Z2, det_bnd, modulus_bnd, n_tt) { 
+compute_rhs <- function(Y1, Y2, X1, X2, Z1, Z2, det_bnds, modulus_bnds, n_tt) { 
 
     # Activate parallel computing if available
     registerDoParallel(cores = detectCores())
@@ -88,56 +87,61 @@ compute_rhs <- function(Y1, Y2, X1, X2, Z1, Z2, det_bnd, modulus_bnd, n_tt) {
     tts <- expand.grid(t_grid, t_grid)
     
     # Estimate for each (t1, t2) pair
-    rhs <- foreach(i = 1:nrow(tts), .combine = c) %dopar% {
+    rhs <- foreach(i = 1:nrow(tts), .combine = rbind) %dopar% {
         tt = matrix(as.numeric(tts[i,]), 1, 2)
-        mean_ratio(Y1, Y2, X1, X2, Z1, Z2, tt, det_bnd, modulus_bnd)
+        mean_ratio(Y1, Y2, X1, X2, Z1, Z2, tt, det_bnds, modulus_bnds)
     }
     return(rhs)
 }
 
 
-
-
-# Compute LHS variable
-compute_lhs <- function(muAB, chol_sigmaAB, n_tt) {
-
-    # Create Fourier variable grid
+# Create Fourier variable grid
+create_tts <- function(n_tt) {    
     t_grid <- seq(-.5, .5, length.out = n_tt)
-    tts <- expand.grid(t_grid, t_grid)
-
-    lhs <- rep(0, n_tt^2)
-    for (i in seq(n_tt^2)) {
-        tt = matrix(as.numeric(tts[i,]), 1, 2)
-        lhs[i] <- normal_cf(muAB, chol_sigmaAB, tt)
-    }
-    return(lhs)
+    return(expand.grid(t_grid, t_grid))
 }
 
 
-loss <- function(rhs, lhs) {
+loss <- function(rhs, tts, p) {
+    
+    lhs <- foreach (i = 1:nrow(tts), .combine = c) %do% {
+        tt = matrix(as.numeric(tts[i,]), 1, 2)
+        normal_cf(p[1:2], p[3:5], tt)
+    }
+    
     # Output the squared distance
     difference <- rhs - lhs
     return(c(Re(difference %*% Conj(difference))))
 }
 
-        
+
+cv_fit <- function(rhs, p_init, n_tt) {
+    tts <- create_tts(n_tt)
+    cv <- foreach (col = rhs, .combine = rbind) %do% {
+        cv_loss <- foreach (i = seq(n_tt^2), .combine = rbind) %do% {
+            result <- nlm(function(p) loss(col[-i], tts[-i,], p), p_init)
+            c(result$minimum, result$estimate)
+        }
+        apply(cv_loss, 2, mean)
+    }
+    thetahat <- cv[which.min(cv[,1]), 2:6]
+    minimum <- cv[which.min(cv[,1]), 1]
+
+    return(list(minimum = minimum, thetahat = thetahat))
+}
+
 
 fhhps <- function(Y1, Y2, X1, X2, Z1, Z2,
-                  mu_init = c(0,0), sigma_init = matrix(c(1,0,0,1), 2,2),
-                  det_bnd = .1, modulus_bnd = .1, n_tt = 10) {
+                  mu_init = c(0,0), 
+                  sigma_init = matrix(c(1,0,0,1), 2,2),
+                  det_bnds = seq(.05, .2, .025), 
+                  modulus_bnds = seq(.05, .2, .025), 
+                  n_tt = 10)  {
     
     p_init <- c(mu_init, chol(sigma_init)[c(1,3,4)])
-    rhs <- compute_rhs(Y1, Y2, X1, X2, Z1, Z2, det_bnd, modulus_bnd, n_tt)
-    obj_fct <- function(theta) {
-        print("theta")
-        print(theta)
-        lhs <- compute_lhs(muAB = theta[1:2], chol_sigmaAB = theta[3:5], n_tt)
-        L <- loss(rhs, lhs)
-        print("Loss")
-        print(L)
-        return(L)
-    }
-    return(nlm(obj_fct, p_init))
+    rhs <- compute_rhs(Y1, Y2, X1, X2, Z1, Z2, det_bnds, modulus_bnds, n_tt)
+    results <- cv_fit(rhs, p_init, n_tt)
+    return(results)
 }
 
 
@@ -171,48 +175,76 @@ build_num_var <- function(Y1, Y2, X1, X2, Z1, Z2, b_Z, tt) {
     return(list(costY = costY, sintY = sintY))
 }
  
-create_numerator <- function(num_var, X1, X2, Z1, Z2, det_bnd) {
+
+# Numerator
+create_numerator <- function(num_var, X1, X2, Z1, Z2, det_bnds) {
     real_part <- fit_model(num_var$costY, X1, X2, Z1, Z2)
     imag_part <- fit_model(num_var$sintY, X1, X2, Z1, Z2)
     
-    # Discar if determinant is too low
+    # Discard if determinant is too low
     numerator <- real_part + i1*imag_part
-    numerator[find_low_det_obs(X1, X2, det_bnd)] <- NaN
-    return(numerator)
+
+    # Make nan of each numerator that doesn't satisfy det_bnd
+    nums <- matrix(numerator, nrow = length(numerator), ncol = length(det_bnds))
+    for (i in length(det_bnds)) {
+        nums[find_low_det_obs(X1, X2, det_bnds[i]), i] <- NaN
+    }
+    return(nums)
 }
+
 
 # Denominator variable
 create_denominator <- function(shock_means, shock_variances, shock_covariance,
-                               X1, X2, Z1, Z2, tt, modulus_bnd) {
+                               X1, X2, Z1, Z2, tt, modulus_bnds) {
+    
     # Make sure dimensions are correct
     n_obs <- dim(X1)[1]
     muW <- matrix(shock_means, 2, 1)
     sigmaW <- matrix(c(shock_variances[1], shock_covariance,
                        shock_covariance, shock_variances[2]), 2, 2)
 
+    # Compute denominator
     denom <- matrix(0, n_obs, 1) 
     for (i in seq(n_obs)) {
         denom[i] <- exp(i1* tt %*% g3(c(X1[i], X2[i])) %*% muW -
                         .5 * tt %*% g3(c(X1[i], X2[i])) %*% sigmaW %*%
                                         t(g3(c(X1[i], X2[i]))) %*% t(tt))
         }
-    return(increase_modulus(denom, modulus_bnd))
+
+    # Increase the modulus for each bound
+    denoms <- foreach(modulus_bnd = modulus_bnds, .combine = cbind) %do% { 
+        increase_modulus(denom, modulus_bnd)
+    }
+    return(denoms)
 }
 
+
 # Right-hand size variable for given Fourier variable t
-mean_ratio <- function(Y1, Y2, X1, X2, Z1, Z2, tt, det_bnd, modulus_bnd) {
+mean_ratio <- function(Y1, Y2, X1, X2, Z1, Z2, tt, det_bnds, modulus_bnds) {
     
     shocks_bw <- estimate_shocks_and_fixed_optimal_bw(Y1, Y2, X1, X2, Z1, Z2) 
     shocks_and_fixed <- estimate_shocks_and_fixed(Y1, Y2, X1, X2, Z1, Z2, shocks_bw) 
     num_var <- build_num_var(Y1, Y2, X1, X2, Z1, Z2, 
                              shocks_and_fixed$fixed_coeffs, tt)
-    numerator <- create_numerator(num_var, X1, X2, Z1, Z2, det_bnd = det_bnd) 
-    denominator <- create_denominator(shocks_and_fixed$shock_means, 
+
+    # Creates several numerators and denominators according to tuning parameters
+    numerators <- create_numerator(num_var, X1, X2, Z1, Z2, det_bnd = det_bnds) 
+    denominators <- create_denominator(shocks_and_fixed$shock_means, 
                                      shocks_and_fixed$shock_variances, 
                                      shocks_and_fixed$shock_covariance,
-                                      X1, X2, Z1, Z2, tt, modulus_bnd)  
-    ratio <- numerator / denominator
-    return(mean(ratio[is.finite(ratio)]))
+                                      X1, X2, Z1, Z2, tt, modulus_bnds)  
+    # One ratio for each (det_bnd, modulus_bnd) combination 
+    n_tuning_params <- length(det_bnds)*length(modulus_bnds)
+    ratios <- foreach(n = numerators, .combine = cbind) %:%
+                foreach(d = denominators, .combine = cbind) %do% {
+                    out <- n/d
+                }
+
+    # Mean ratios
+    mean_ratios <- foreach(r = ratios, .combine = c) %do% { 
+        mean(r[is.finite(r)])
+    }     
+    return(mean_ratios)
 }
 
 # Increases |z| keeping arg(z) constant
@@ -332,22 +364,22 @@ estimate_shocks_and_fixed_optimal_bw <- function(Y1, Y2, X1, X2, Z1, Z2,
 
 fit_model <- function(Y, X1, X2, Z1, Z2, n_folds = NULL) 
 {
+
     if (is.null(Z1) || is.null(Z2)) {
-        dataset <- data.frame(Y = Y, X1 = X1, X2 = X2)
+        dataset1 <- data.frame(Y, X1, X2)
         fmla <- formula(Y ~ s(X1) + s(X2))
     } else {
-        dataset <- data.frame(Y = Y, X1 = X1, X2 = X2, Z1 = Z1, Z2 = Z2)
-        regressors <- foreach(col=colnames(dataset), .combine=c) %:% 
-        when(col != "Y") %do% 
-            sprintf("s(%s)", col) 
+        dataset1 <- data.frame(Y, X1, X2, Z1, Z2)
+        regressors <- foreach(col=colnames(dataset1), .combine=c) %:% 
+                        when(col != "Y") %do% 
+                        sprintf("s(%s)", col) 
         fmla <- as.formula(paste(c("Y ~ ", paste(regressors, collapse = " + "))))
     }
 
     n_obs <- length(Y)
     n_folds <- if (is.null(n_folds)) n_obs else n_folds
-    model <- CVgam(fmla, data = dataset, nfold = n_folds, printit = FALSE)
+    model <- CVgam(fmla, data = dataset1, nfold = n_folds, printit = FALSE)
     estimates <- model$fitted
+
     return(as.matrix(estimates))
 }
-
-
