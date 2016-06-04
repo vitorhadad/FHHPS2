@@ -72,20 +72,14 @@ normal_cf <- function(muAB, chol_sigmaAB, tt) {
 
 
 # Integrates the ratio over t  
-compute_rhs <- function(Y1, Y2, X1, X2, Z1, Z2, det_bnds, modulus_bnds, reg_params, n_tt) { 
+compute_rhs <- function(Y1, Y2, X1, X2, Z1, Z2, det_bnds, modulus_bnds, reg_params, tts) { 
 
-    print("Computing RHS variable")
     # Activate parallel computing if available
     registerDoParallel(cores = detectCores())
 
-    # Create Fourier variable grid
-    tts <- create_tts(n_tt)
-
-    print("Estimating shocks")
     shocks_bw <- estimate_shocks_and_fixed_optimal_bw(Y1, Y2, X1, X2, Z1, Z2) 
     shocks_and_fixed <- estimate_shocks_and_fixed(Y1, Y2, X1, X2, Z1, Z2, shocks_bw)
 
-    print("Mean ratio")
     # Estimate for each (t1, t2) pair
     rhs <- foreach(i = 1:nrow(tts), .combine = rbind) %dopar% {
         tt = matrix(as.numeric(tts[i,]), 1, 2)
@@ -97,8 +91,7 @@ compute_rhs <- function(Y1, Y2, X1, X2, Z1, Z2, det_bnds, modulus_bnds, reg_para
 
 # Create Fourier variable grid
 create_tts <- function(n_tt) {    
-    t_grid <- c(seq(-.3, .01, length.out = floor(n_tt/2)), 
-                seq(.01, .3, length.out = floor(n_tt/2))) 
+    t_grid <- runif(n = n_tt, min = -.5, max = .5)
     return(expand.grid(t_grid, t_grid))
 }
 
@@ -116,36 +109,24 @@ loss <- function(rhs, tts, p) {
 }
 
 
-cv_fit <- function(rhs, p_init, n_tt) {
-    tts <- create_tts(n_tt)
-    cv <- foreach (col = rhs, .combine = rbind) %dopar% {
-        cv_loss <- foreach (t = seq(n_tt^2), .combine = rbind) %dopar% {
-            result <- nlm(function(p) loss(col[-t], tts[-t,], p), p_init)
-            c(result$minimum, result$estimate)
+
+# Fit on training set
+fit_estimates <- function(rhs, p_init, tts) {
+    estimates <- foreach (col = rhs, .combine = cbind) %dopar% {
+        result <- nlm(function(p) loss(as.complex(col), tts, p), p_init)$estimate
         }
-        apply(cv_loss, 2, mean)
+    return(estimates)
+}
+ 
+
+# Score on test set
+score_estimates <- function(rhs, estimates, tts) {
+    test_errors <-  foreach (i = seq(ncol(rhs)), .combine = c) %dopar% {
+        error <- loss(rhs[,i], tts, estimates[,i])
     }
-    thetahat <- cv[which.min(cv[,1]), 2:6]
-    minimum <- cv[which.min(cv[,1]), 1]
-
-    return(list(minimum = minimum, thetahat = thetahat))
+    return(test_errors)
 }
 
-
-fhhps <- function(Y1, Y2, X1, X2, Z1, Z2,
-                  mu_init = c(0,0), 
-                  sigma_init = matrix(c(1,0,0,1), 2,2),
-                  det_bnds = seq(.02, .1, .01), 
-                  modulus_bnds = seq(.02, .1, .01),
-                  reg_params = c(0.1,1,5,10,50),
-                  n_tt = 12)  {
-    
-    p_init <- c(mu_init, chol(sigma_init)[c(1,3,4)])
-    rhs <- compute_rhs(Y1, Y2, X1, X2, Z1, Z2, det_bnds, modulus_bnds, reg_params, n_tt)
-    print("Fitting lhs to rhs")
-    results <- cv_fit(rhs, p_init, n_tt)
-    return(results)
-}
 
 
 
@@ -183,8 +164,8 @@ build_num_var <- function(Y1, Y2, X1, X2, Z1, Z2, b_Z, tt) {
 create_numerator <- function(num_var, X1, X2, Z1, Z2, det_bnds, reg_params) {
     
     # This will be a matrix 
-    real_part <- fit_model(num_var$costY, X1, X2, Z1, Z2, reg_params)
-    imag_part <- fit_model(num_var$sintY, X1, X2, Z1, Z2, reg_params)
+    real_part <- fit_regression(num_var$costY, X1, X2, Z1, Z2, reg_params)
+    imag_part <- fit_regression(num_var$sintY, X1, X2, Z1, Z2, reg_params)
     numerator <- real_part + i1*imag_part
     
     # Make nan of each numerator that doesn't satisfy det_bnd
@@ -335,7 +316,8 @@ rnorm(n = 1,mean = 0, sd = sqrt(5))
 
 
 
-estimate_shocks_and_fixed_optimal_bw <- function(Y1, Y2, X1, X2, Z1, Z2, bw_lower = .05, bw_upper = .5, n_bws = 20, n_folds = 10) {
+estimate_shocks_and_fixed_optimal_bw <- function(Y1, Y2, X1, X2, Z1, Z2, 
+                            bw_lower = .05, bw_upper = .5, n_bws = 20, n_folds = 10) {
     
     n_obs <- dim(Y1)[1]
     shocks_bws <- seq(bw_lower, bw_upper, length.out = n_bws)
@@ -369,7 +351,7 @@ estimate_shocks_and_fixed_optimal_bw <- function(Y1, Y2, X1, X2, Z1, Z2, bw_lowe
 }
 
 
-fit_model <- function(Y, X1, X2, Z1 = NULL, Z2 = NULL, reg_params) {
+fit_regression <- function(Y, X1, X2, Z1 = NULL, Z2 = NULL, reg_params) {
         estimates <- foreach(k = reg_params, .combine = cbind) %dopar% {
         model <- tryCatch( knn.reg(train = cbind(X1, X2, Z1, Z2), y = Y, k  = k), 
                           error = function(e) { 
@@ -379,5 +361,47 @@ fit_model <- function(Y, X1, X2, Z1 = NULL, Z2 = NULL, reg_params) {
         model$pred
     }
     return(as.matrix(estimates))
+}
+
+
+fhhps <- function(Y1, Y2, X1, X2, Z1, Z2,
+                  mu_init = c(0,0), 
+                  sigma_init = matrix(c(1,0,0,1), 2, 2),
+                  det_bnds = seq(.05, .1, .01), 
+                  modulus_bnds = seq(.05, .1, .01),
+                  reg_params = c(1,3,4,5),
+                  n_tt = 10)  {
+    
+    p_init <- c(mu_init, chol(sigma_init)[c(1,3,4)])
+    
+    tts_train <- create_tts(n_tt)
+    rhs_train <- compute_rhs(Y1, Y2, X1, X2, Z1, Z2, det_bnds, modulus_bnds, reg_params, tts_train)
+    estimates <- fit_estimates(rhs_train, p_init, tts_train)
+ 
+    tts_test <- create_tts(n_tt)
+    rhs_test <- compute_rhs(Y1, Y2, X1, X2, Z1, Z2, det_bnds, modulus_bnds, reg_params, tts_test)
+    scores <- score_estimates(rhs_test, estimates, tts_test)
+    table <- build_table(modulus_bnds, det_bnds, reg_params, n_tt, scores, estimates)
+
+    return(table)
+    
+}
+
+
+
+build_table <- function(modulus_bnds, det_bnds, reg_params, n_tt, scores, estimates) {
+    
+    parameters <- expand.grid(modulus_bnds, det_bnds, reg_params)
+    means <- t(estimates[1:2,])
+    covariances <- foreach (i = seq(ncol(estimates)), .combine = rbind) %do% {
+        L <- matrix(c(estimates[3,i],estimates[4,i],0,estimates[5,i]), 2, 2)
+        Sigma <- t(L) %*% L
+        c(Sigma[1,1], Sigma[1,2], Sigma[2,2])
+    }
+    n_tts <- rep(n_tt, dim(covariances)[1])
+    table <- cbind(parameters, scores, n_tts, means, covariances)
+    colnames(table) <- c("modulus_bnd", "det_bnd", "reg_params",  "score", "n_tt", 
+                         "EA", "EB", "VA", "CAB", "VB")
+    return(table)
 }
 
